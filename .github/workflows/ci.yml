@@ -1,0 +1,66 @@
+# GitHub mirror of the GitLab pipeline, running fully on the simulated
+# bench so every push exercises the whole restart -> health -> flash -> test
+# flow without hardware.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -m "not bench" --cov=benchctl --cov-report=term
+
+  simulated-bench:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    env:
+      BENCH_NAME: sim-bench
+      ECU_VERSION: "1.4.2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Prepare bench (restart, health gate, flash)
+        run: |
+          mkdir -p build && head -c 1024 /dev/zero > build/ecu_app_${ECU_VERSION}.bin
+          benchctl prepare --image build/ecu_app_${ECU_VERSION}.bin --version $ECU_VERSION
+      - name: Bench smoke tests
+        run: pytest -m bench --junitxml=reports/bench.xml
+      - name: Health gate blocks a faulty bench
+        env:
+          BENCH_SIM_FAULTS: no_heartbeat
+        run: |
+          if benchctl health; then
+            echo "::error::health gate passed on a faulty bench"; exit 1
+          fi
+          echo "Health gate correctly failed on injected fault"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-reports
+          path: reports/

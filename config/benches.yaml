@@ -1,0 +1,31 @@
+# Bench inventory. Each bench matches a self-hosted GitLab runner tag.
+#
+# backend: simulated | winrm
+#   simulated - no hardware, used in CI and local development
+#   winrm     - real Windows bench PC (see benchctl/drivers/winrm.py)
+
+benches:
+  sim-bench:
+    host: localhost
+    backend: simulated
+    reboot_timeout_s: 30
+    poll_interval_s: 0.1
+
+  hil-bench-01:
+    host: hil-bench-01.lab.example
+    backend: winrm
+    can_channel: PCAN_USBBUS1
+    ecu_id: ECU_A
+    reboot_timeout_s: 300
+    poll_interval_s: 5
+    limits:
+      psu_voltage_min: 11.5
+      psu_voltage_max: 14.5
+      heartbeat_timeout_s: 2.0
+      max_active_dtcs: 0
+
+  hil-bench-02:
+    host: hil-bench-02.lab.example
+    backend: winrm
+    can_channel: PCAN_USBBUS1
+    ecu_id: ECU_B

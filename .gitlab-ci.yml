@@ -1,0 +1,108 @@
+# Pipeline for physical HIL benches on self-hosted GitLab runners.
+#
+# Code checks run on shared runners on every push. The bench stages run on
+# the runner installed on the bench PC (matched by tag) for nightly schedules
+# and manual runs, and `resource_group` stops two pipelines using the same
+# bench at once.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+variables:
+  BENCH_NAME: hil-bench-01
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  # Set per build; the image comes from the upstream build pipeline.
+  ECU_IMAGE: build/ecu_app_${ECU_VERSION}.bin
+  ECU_VERSION: "1.4.2"
+
+stages:
+  - check
+  - prepare_bench
+  - bench_test
+  - report
+
+.python:
+  image: python:3.12-slim
+  cache:
+    paths: [.cache/pip]
+  before_script:
+    - pip install -e ".[dev]"
+
+.on_bench:
+  tags: [hil-bench-01]          # runner installed on the bench PC
+  resource_group: hil-bench-01  # one pipeline per bench at a time
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  before_script:
+    - pip install -e ".[winrm]"
+
+# --- check: every push ------------------------------------------------
+lint:
+  extends: .python
+  stage: check
+  script:
+    - ruff check .
+    - ruff format --check .
+
+unit_tests:
+  extends: .python
+  stage: check
+  script:
+    - pytest -m "not bench" --junitxml=reports/unit.xml --cov=benchctl --cov-report=term
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  artifacts:
+    when: always
+    reports:
+      junit: reports/unit.xml
+
+simulated_pipeline:
+  extends: .python
+  stage: check
+  variables:
+    BENCH_NAME: sim-bench
+  script:
+    - mkdir -p build && head -c 1024 /dev/zero > "$ECU_IMAGE"
+    - benchctl prepare --image "$ECU_IMAGE" --version "$ECU_VERSION"
+    - pytest -m bench --junitxml=reports/bench.xml
+  artifacts:
+    when: always
+    paths: [reports/]
+    reports:
+      junit: reports/bench.xml
+
+# --- real bench: nightly / manual -------------------------------------
+prepare_bench:
+  extends: .on_bench
+  stage: prepare_bench
+  script:
+    - benchctl prepare --image "$ECU_IMAGE" --version "$ECU_VERSION"
+  artifacts:
+    when: always
+    paths: [reports/prepare.json]
+
+bench_tests:
+  extends: .on_bench
+  stage: bench_test
+  needs: [prepare_bench]
+  variables:
+    EXPECTED_SW_VERSION: $ECU_VERSION
+  script:
+    - pytest -m bench --junitxml=reports/bench.xml
+  artifacts:
+    when: always
+    paths: [reports/]
+    reports:
+      junit: reports/bench.xml
+
+bench_summary:
+  extends: .on_bench
+  stage: report
+  needs: [prepare_bench, bench_tests]
+  when: always
+  script:
+    - python -c "import json; r=json.load(open('reports/prepare.json')); print('bench', r['bench'], 'prepared:', r['passed'])"
